@@ -1,0 +1,18 @@
+En esta carpeta encontrarás los ejemplos de redirecciones y pipes: 
+
+    redir.c (redirecciona sólo la salida estándar a un 
+             fichero usando la llamada a dup)
+
+    redir2.c (redirecciona tanto la entrada como 
+             la salida a ficheros).
+
+    pipe.c (un ejemplo de un pipe simple, solo hay dos 
+           procesos involucrados, el tratamiento de la 
+           línea de comando es muy simple y no permite 
+           el uso de argumentos en la invocación a programas).
+
+    pipes.c (ejemplo de múltiples pipes, línea de comando muy 
+             simple, como el caso anterior).
+             
+             
+    timeout.zip (diversas implementaciones de timers)
