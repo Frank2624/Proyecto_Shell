@@ -59,6 +59,57 @@ void mask_signal(int signal, int block)
 }
 // -----------------------------------------------------------------------------
 
+int subs_autovars(char **argv, int shell_pid, int last_pid, int retval) {
+
+    for (int i=0;argv[i]!=NULL;i++){
+        if (strcmp(argv[i],"$$")==0){
+            free(argv[i]);                            
+            argv[i] = malloc(32 * sizeof(char));         
+            sprintf(argv[i], "%d", shell_pid);
+        }
+        else if (strcmp(argv[i],"$!")==0){
+            if (last_pid!=-1){
+                free(argv[i]);                            
+                argv[i] = malloc(32 * sizeof(char));         
+                sprintf(argv[i], "%d", last_pid);
+            }
+        }
+        else if (strcmp(argv[i],"$?")==0){
+            if (retval!=-1){
+                free(argv[i]);                            
+                argv[i] = malloc(32 * sizeof(char));         
+                sprintf(argv[i], "%d", retval);
+            }
+        }
+        
+        else if (argv[i][0]=='$' && strlen(argv[i])>1){
+
+            char *nombre_var = argv[i] + 1;
+
+            char *valor= getenv(nombre_var);
+            free(argv[i]);
+
+            if (valor!=NULL){
+                char *nuevo_arg=malloc((strlen(valor)+1)*sizeof(char));
+                strcpy(nuevo_arg,valor);
+                argv[i]=nuevo_arg;
+            }
+            else{
+                for (int j=i;argv[j]!=NULL;j++){
+                    argv[j]=argv[j+1];
+                }
+                i--;
+            }
+        }
+    }
+    
+    
+    int cont=0;
+    while(argv[cont]!=NULL){
+        cont++;
+    }
+    return cont;
+}
 
 // -----------------------------------------------------------------------------
 //                            MAIN          
@@ -72,7 +123,9 @@ int main(void)
     int pid_fork, pid_wait;     // pid for created and waited process
     int wstatus;                // status returned by waitpid
     char *file_in, *file_out;   // for redirections
-    
+    int shell_pid=getpid();
+    int last_pid=-1;
+    int retval=-1;
     terminal_signals(SIG_IGN);
     while (1) {
         free_argv(argv);
@@ -84,12 +137,10 @@ int main(void)
         if (argc == 0) continue; // empty command after parsing comment #
         argc = parse_background(argv, &background);
         if (argc == 0) continue; // empty command after parsing background &
+        argc=subs_autovars(argv,shell_pid,last_pid,retval);
         argc = parse_redirections(argv,  &file_in, &file_out);
         if (argc == 0) continue; // empty command after parsing redirections
         
-//	int subs_autovars(char *argv[]){
-		
-//	}
 
 
 
@@ -108,20 +159,36 @@ int main(void)
         case -1: perror("fork"); continue;
         
         case 0: //child
+        // (2) the child process will invoke execvp()
                 execvp(argv[0],argv);  
                 perror(argv[0]);
                 exit(EXIT_FAILURE);
         
         default://parent
-                waitpid(pid_fork,&wstatus,0); 
-        }
-        // (2) the child process will invoke execvp()
+                last_pid = pid_fork;
         // (3) if background == 0, the parent will wait, otherwise
+                if (!background) {
+                pid_wait = waitpid(pid_fork, &wstatus, 0);
+                if (pid_wait == -1) perror("waitpid");
         // (4) Shell shows a status message for processed command 
+                if (WIFEXITED(wstatus)) {
+                    retval = WEXITSTATUS(wstatus);
+                    printf("[%d] (%s) Terminated with status: %d\n", pid_fork, argv[0], retval);
+                } else if (WIFSIGNALED(wstatus)) {
+                    int sig = WTERMSIG(wstatus);
+                    printf("[%d] (%s) Signaled by signal: %d\n", pid_fork, argv[0], sig);
+                } else {
+                    printf("[%d] (%s) Stopped or other\n", pid_fork, argv[0]);
+                }
+            } else {
+                printf("[%d] (%s) Running in background\n", pid_fork, argv[0]);
+            }
         // (5) loop ret
-
+        }
     } // end while
     printf("\nBye\n");
     return 0;
 }
+
+
 
