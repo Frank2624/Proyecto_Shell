@@ -35,6 +35,7 @@
 // Declara aqui las variables globales que tengan que ser accedidas desde los
 //  manejadores establecidos con signal() o sigaction()
 
+    list_head_t *job_list = NULL;
 
 // -----------------------------------------------------------------------------
 // Useful functions to deal with signal handlers and signal masks
@@ -111,6 +112,50 @@ int subs_autovars(char **argv, int shell_pid, int last_pid, int retval) {
     return cont;
 }
 
+void handler_singchld(int signal){
+    while(1){
+        int wstatus;
+        int pid_wait= waitpid(-1, &wstatus, WNOHANG | WUNTRACED | WCONTINUED);
+         
+        if (pid_wait <= 0) break;
+
+        mask_signal(SIGCHLD, SIG_BLOCK);
+        job *task= get_job_bypid(job_list,pid_wait);
+        mask_signal(SIGCHLD, SIG_UNBLOCK); 
+
+        if (task == NULL) continue;
+
+        if (WIFEXITED(wstatus)) {
+            
+            printf("[%d] (%s) Terminated with status: %d\n", task->pgid,task->command,WEXITSTATUS(wstatus));
+            mask_signal(SIGCHLD, SIG_BLOCK);
+            del_job(job_list,task);
+            free_job(task);
+            mask_signal(SIGCHLD, SIG_UNBLOCK); 
+
+        }
+                    
+         else if (WIFSIGNALED(wstatus)) {
+            int sig = WTERMSIG(wstatus);
+            printf("[%d] (%s) Signaled by signal: %d\n", task->pgid,task->command, sig);
+            mask_signal(SIGCHLD, SIG_BLOCK);
+            del_job(job_list,task);
+            free_job(task);
+            mask_signal(SIGCHLD, SIG_UNBLOCK); 
+        } 
+                    
+        else if (WIFSTOPPED(wstatus)){
+            task->state=STOPPED;
+            printf("[%d] (%s) Stopped by signal: %d\n", task->pgid,task->command, WSTOPSIG(wstatus));
+        } 
+                    
+        else if(WIFCONTINUED(wstatus)) {
+            task->state=BACKGROUND;
+            printf("[%d] (%s) continued\n", task->pgid,task->command);
+        }
+    }
+}
+
 // -----------------------------------------------------------------------------
 //                            MAIN          
 // -----------------------------------------------------------------------------
@@ -118,6 +163,7 @@ int main(void)
 {
     char **argv = NULL;
     int argc;
+    job_list=new_list("Jobs");
     // probably useful variables:
     int background;             // equals 1 if a command is followed by '&'
     int pid_fork, pid_wait;     // pid for created and waited process
@@ -126,6 +172,8 @@ int main(void)
     int shell_pid=getpid();
     int last_pid=-1;
     int retval=-1;
+    signal(SIGCHLD,handler_singchld);
+
     terminal_signals(SIG_IGN);
     while (1) {
         free_argv(argv);
@@ -158,6 +206,13 @@ int main(void)
 
             if (chdir(dir)!=0) perror(argv[0]);
             
+            continue;
+        }
+        if (strcmp(argv[0],"jobs")==0){
+            mask_signal(SIGCHLD, SIG_BLOCK);
+            print_job_list(job_list);
+            mask_signal(SIGCHLD, SIG_UNBLOCK); 
+
             continue;
         }
         
@@ -199,12 +254,24 @@ int main(void)
                         printf("[%d] (%s) Signaled by signal: %d\n", pid_fork, argv[0], sig);
                     } 
                     
-                    else if (WIFSTOPPED(wstatus)) printf("[%d] (%s) Stopped by signal: %d\n", pid_fork, argv[0], WSTOPSIG(wstatus));
+                    else if (WIFSTOPPED(wstatus)){
+                        job *task= new_job(pid_fork,argv[0],STOPPED);
+                        mask_signal(SIGCHLD, SIG_BLOCK);
+                        add_job(job_list,task);
+                        mask_signal(SIGCHLD, SIG_UNBLOCK); 
+                        printf("[%d] (%s) Stopped by signal: %d\n", pid_fork, argv[0], WSTOPSIG(wstatus));
+                    } 
                     
                     else printf("[%d] (%s) other\n", pid_fork, argv[0]);
                     
 
-               } else printf("[%d] (%s) Running in background\n", pid_fork, argv[0]);
+               } else{
+                    job *task= new_job(pid_fork,argv[0],BACKGROUND);
+                    mask_signal(SIGCHLD, SIG_BLOCK);
+                    add_job(job_list,task);
+                    mask_signal(SIGCHLD, SIG_UNBLOCK); 
+                   printf("[%d] (%s) Running in Background\n", pid_fork, argv[0]);
+               } 
             
         // (5) loop ret
         }
