@@ -141,10 +141,6 @@ int main(void)
         argc = parse_redirections(argv,  &file_in, &file_out);
         if (argc == 0) continue; // empty command after parsing redirections
         
-
-
-
-
         if (strcmp(argv[0],"quit")==0) break;// comando interno 'quit'
         if (strcmp(argv[0],"exit")==0) {// comando interno 'exit retval'
           int retval=0;
@@ -152,7 +148,22 @@ int main(void)
           else retval=atoi(argv[1]);
           exit(retval);
         
-        }// the steps are:
+        }
+        
+        if (strcmp(argv[0],"cd")==0){
+            char *dir;
+
+            if (argv[1]==NULL) dir=getenv("HOME");
+            else dir=argv[1];
+
+            if (chdir(dir)!=0) perror(argv[0]);
+            
+            continue;
+        }
+        
+        
+        
+        // the steps are:
         // (1) fork a child process using fork()
      	pid_fork=fork();
         switch(pid_fork){
@@ -160,29 +171,41 @@ int main(void)
         
         case 0: //child
         // (2) the child process will invoke execvp()
+                setpgid(getpid(),getpid());
+                
+                if (!background)tcsetpgrp(STDIN_FILENO,getpid());
+                terminal_signals(SIG_DFL);
                 execvp(argv[0],argv);  
                 perror(argv[0]);
                 exit(EXIT_FAILURE);
         
         default://parent
+                setpgid(pid_fork,pid_fork);
                 last_pid = pid_fork;
         // (3) if background == 0, the parent will wait, otherwise
                 if (!background) {
-                pid_wait = waitpid(pid_fork, &wstatus, 0);
-                if (pid_wait == -1) perror("waitpid");
+                    pid_wait = waitpid(pid_fork, &wstatus, WUNTRACED);
+                    tcsetpgrp(STDIN_FILENO,getpid());
+                    
+                    if (pid_wait == -1) perror("waitpid");
         // (4) Shell shows a status message for processed command 
-                if (WIFEXITED(wstatus)) {
-                    retval = WEXITSTATUS(wstatus);
-                    printf("[%d] (%s) Terminated with status: %d\n", pid_fork, argv[0], retval);
-                } else if (WIFSIGNALED(wstatus)) {
-                    int sig = WTERMSIG(wstatus);
-                    printf("[%d] (%s) Signaled by signal: %d\n", pid_fork, argv[0], sig);
-                } else {
-                    printf("[%d] (%s) Stopped or other\n", pid_fork, argv[0]);
-                }
-            } else {
-                printf("[%d] (%s) Running in background\n", pid_fork, argv[0]);
-            }
+                    if (WIFEXITED(wstatus)) {
+                        retval = WEXITSTATUS(wstatus);
+                        printf("[%d] (%s) Terminated with status: %d\n", pid_fork, argv[0], retval);
+                    }
+                    
+                    else if (WIFSIGNALED(wstatus)) {
+                        int sig = WTERMSIG(wstatus);
+                        printf("[%d] (%s) Signaled by signal: %d\n", pid_fork, argv[0], sig);
+                    } 
+                    
+                    else if (WIFSTOPPED(wstatus)) printf("[%d] (%s) Stopped by signal: %d\n", pid_fork, argv[0], WSTOPSIG(wstatus));
+                    
+                    else printf("[%d] (%s) other\n", pid_fork, argv[0]);
+                    
+
+               } else printf("[%d] (%s) Running in background\n", pid_fork, argv[0]);
+            
         // (5) loop ret
         }
     } // end while
