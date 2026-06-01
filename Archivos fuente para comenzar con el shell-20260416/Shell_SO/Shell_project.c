@@ -41,7 +41,7 @@
 // Declara aqui las variables globales que tengan que ser accedidas desde los
 //  manejadores establecidos con signal() o sigaction()
 
-    list_head_t *job_list = NULL;
+    list_head_t *job_list = NULL; //lista de gestión de tareas
 
 // -----------------------------------------------------------------------------
 // Useful functions to deal with signal handlers and signal masks
@@ -64,8 +64,10 @@ void mask_signal(int signal, int block)
     sigaddset(&mask, signal);
     sigprocmask(block, &mask, NULL); // block: SIG_BLOCK/SIG_UNBLOCK
 }
-// -----------------------------------------------------------------------------
 
+// -----------------------------------------------------------------------------
+// SUSTITUCIÓN DE VARIABLES AUTOMÁTICAS Y DE ENTORNO
+// -----------------------------------------------------------------------------
 int subs_autovars(char **argv, int shell_pid, int last_pid, int retval) {
 
     for (int i=0;argv[i]!=NULL;i++){
@@ -117,6 +119,9 @@ int subs_autovars(char **argv, int shell_pid, int last_pid, int retval) {
     }
     return cont;
 }
+// -----------------------------------------------------------------------------
+//      MANEJADOR DE LA SEÑAL SIGCHLD  (Procesos en Background/Suspendidos)      
+// -----------------------------------------------------------------------------
 
 void handler_singchld(int signal){
     while(1){
@@ -184,6 +189,7 @@ int main(void)
     int retval=-1;
     signal(SIGCHLD,handler_singchld);
 
+    //Apago las señales para que la terminal no pueda ser detenida con ctrl z, ctrl c, etc
     terminal_signals(SIG_IGN);
     while (1) {
         free_argv(argv);
@@ -198,9 +204,12 @@ int main(void)
         argc=subs_autovars(argv,shell_pid,last_pid,retval);
         argc = parse_redirections(argv,  &file_in, &file_out);
         if (argc == 0) continue; // empty command after parsing redirections
+        // -----------------------------------------------------------------------------
+        //                         COMANDOS INTERNOS           
+        // -----------------------------------------------------------------------------        
         
-        if (strcmp(argv[0],"quit")==0) break;// comando interno 'quit'
-        if (strcmp(argv[0],"exit")==0) {// comando interno 'exit retval'
+        if (strcmp(argv[0],"quit")==0) break;// 'quit' terminación del shell sin retval
+        if (strcmp(argv[0],"exit")==0) {// 'exit retval' terminación con retval
           int retval=0;
           if (argv[1]==NULL) retval=0;
           else retval=atoi(argv[1]);
@@ -208,6 +217,7 @@ int main(void)
         
         }
         
+        // 'cd' para cambiar el directorio de trabajo
         if (strcmp(argv[0],"cd")==0){
             char *dir;
 
@@ -218,6 +228,7 @@ int main(void)
             
             continue;
         }
+        // 'jobs' para visualizar la lista de trabajos 
         if (strcmp(argv[0],"jobs")==0){
             mask_signal(SIGCHLD, SIG_BLOCK);
             print_job_list(job_list);
@@ -226,6 +237,7 @@ int main(void)
             continue;
         }
         
+        //'bg' para lanzar en BACKGROUND un proceso suspendido
         if (strcmp(argv[0],"bg")==0){
             job *task;
             mask_signal(SIGCHLD, SIG_BLOCK);
@@ -251,7 +263,7 @@ int main(void)
             }
             continue;
         }
-        
+        //'fg' para pasar a FOREGROUND una tarea en BACKGROUND o suspendida
         if (strcmp(argv[0],"fg")==0){
             job *task;
             mask_signal(SIGCHLD, SIG_BLOCK);
@@ -287,6 +299,8 @@ int main(void)
                 else if (WIFSIGNALED(wstatus)) {
                     int sig = WTERMSIG(wstatus);
                     printf("[%d] (%s) Signaled by signal: %d\n", task->pgid, task->command, sig);
+                    del_job(job_list,task);
+                    free_job(task);
                 } 
                     
                 else if (WIFSTOPPED(wstatus)){
@@ -301,6 +315,10 @@ int main(void)
             }
             continue;
         }
+
+// -----------------------------------------------------------------------------
+//                           COMANDOS EXTERNOS          
+// -----------------------------------------------------------------------------
         // the steps are:
         // (1) fork a child process using fork()
      	pid_fork=fork();
@@ -314,7 +332,7 @@ int main(void)
                 if (!background)tcsetpgrp(STDIN_FILENO,getpid());
                 terminal_signals(SIG_DFL);
 
-                //Redirections
+                //Redirecciones de entrada y salida 
                 if (file_in!=NULL){
                     int f_in=open(file_in,O_RDONLY);
 
@@ -322,11 +340,8 @@ int main(void)
                         perror(file_in);
                         exit(EXIT_FAILURE);
                     }
-
                     dup2(f_in,STDIN_FILENO);
                     close(f_in);
-
-
                 }
                 if (file_out!=NULL){
                     int f_out=open(file_out,O_CREAT|O_WRONLY|O_TRUNC,0664);
@@ -338,7 +353,6 @@ int main(void)
                     dup2(f_out,STDOUT_FILENO);
                     close(f_out);
                 }
-
                 execvp(argv[0],argv);  
                 perror(argv[0]);
                 exit(EXIT_FAILURE);
@@ -373,7 +387,7 @@ int main(void)
                     
                     else printf("[%d] (%s) other\n", pid_fork, argv[0]);
                     
-
+        // Gestiono las tareas lanzadas en BACKGROUND
                } else{
                     job *task= new_job(pid_fork,argv[0],BACKGROUND);
                     mask_signal(SIGCHLD, SIG_BLOCK);
