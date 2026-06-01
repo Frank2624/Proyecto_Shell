@@ -33,7 +33,15 @@
 // local project headers
 #include "parse_line.h"     // link with parse_line.o
 #include "job_control.h"    // link with job_control.o and list.o
-
+#define RESET "\x1b[0m"
+#define RED "\x1b[31m"
+#define GREEN "\x1b[32m"
+#define YELLOW "\x1b[33m"
+#define BLUE "\x1b[34m"
+#define MAGENTA "\x1b[35m"
+#define CYAN "\x1b[36m"
+#define WHITE "\x1b[37m"
+#define DEFAULT "\x1b[39m"
 
 // -----------------------------------------------------------------------------
 //                            Global data structures
@@ -104,9 +112,9 @@ int subs_autovars(char **argv, int shell_pid, int last_pid, int retval) {
                 argv[i]=nuevo_arg;
             }
             else{
-                for (int j=i;argv[j]!=NULL;j++){
-                    argv[j]=argv[j+1];
-                }
+
+                for (int j=i;argv[j]!=NULL;j++) argv[j]=argv[j+1];
+                
                 i--;
             }
         }
@@ -187,11 +195,14 @@ int main(void)
     int shell_pid=getpid();
     int last_pid=-1;
     int retval=-1;
+    int apply_mask;
+    sigset_t custom_mask;
     signal(SIGCHLD,handler_singchld);
 
     //Apago las señales para que la terminal no pueda ser detenida con ctrl z, ctrl c, etc
     terminal_signals(SIG_IGN);
     while (1) {
+        apply_mask=0;
         free_argv(argv);
         int ret = get_command("ShellSO > ", &argc, &argv);
         if (ret == -1) exit(EXIT_FAILURE);      // error in read(2)
@@ -315,6 +326,43 @@ int main(void)
             }
             continue;
         }
+        //'mask' para lanzar un comando con señales enmascaradas
+        if (strcmp(argv[0],"mask")==0){
+            int i=0;
+            while ( argv[i]!=NULL && strcmp(argv[i],"-c")!=0) i++;
+            
+            if(argv[i]==NULL || argv[i+1]==NULL){
+                printf("mask: error de sintaxis\n");
+                continue;
+            }
+
+            sigemptyset(&custom_mask);
+            
+            int j=1;
+            int error=0;
+            while (j<i && !error){
+
+                char *resto;
+                int sig = strtol(argv[j], &resto, 10);
+
+                // Si *resto no es el final de la cadena ('\0'), es que hay un . o algo incorrecto
+                if (*resto != '\0' || sig <= 0) {
+                    printf("mask: error de sintaxis\n");
+                    error=1;
+                }
+                else{
+                    sigaddset(&custom_mask,sig);
+                    j++;
+                }
+            }
+
+            if (error) continue;
+            
+            apply_mask=1;
+
+            for (int k=0;argv[k]!=NULL;k++) argv[k]=argv[1+i+k];
+                
+        }
 
 // -----------------------------------------------------------------------------
 //                           COMANDOS EXTERNOS          
@@ -331,6 +379,9 @@ int main(void)
                 
                 if (!background)tcsetpgrp(STDIN_FILENO,getpid());
                 terminal_signals(SIG_DFL);
+
+                if (apply_mask) sigprocmask(SIG_BLOCK, &custom_mask, NULL);
+
 
                 //Redirecciones de entrada y salida 
                 if (file_in!=NULL){
