@@ -1,4 +1,10 @@
 //------------------------------------------------------------------------------
+// Francisco Rosales Arévalo
+
+
+
+
+
 // UNIX Shell Project
 // 
 // Sistemas Operativos
@@ -145,12 +151,16 @@ void handler_singchld(int signal){
         } 
                     
         else if (WIFSTOPPED(wstatus)){
+            mask_signal(SIGCHLD, SIG_BLOCK);
             task->state=STOPPED;
+            mask_signal(SIGCHLD, SIG_UNBLOCK);
             printf("[%d] (%s) Stopped by signal: %d\n", task->pgid,task->command, WSTOPSIG(wstatus));
         } 
                     
         else if(WIFCONTINUED(wstatus)) {
+            mask_signal(SIGCHLD, SIG_BLOCK);
             task->state=BACKGROUND;
+            mask_signal(SIGCHLD, SIG_UNBLOCK);
             printf("[%d] (%s) continued\n", task->pgid,task->command);
         }
     }
@@ -216,8 +226,81 @@ int main(void)
             continue;
         }
         
+        if (strcmp(argv[0],"bg")==0){
+            job *task;
+            mask_signal(SIGCHLD, SIG_BLOCK);
+            if (argv[1]==NULL) task=get_item_bypos(job_list,1);
+            
+            else task= get_item_bypos(job_list,atoi(argv[1]));
+
+            mask_signal(SIGCHLD, SIG_UNBLOCK); 
+            
+            if (task==NULL) perror("Not found");
+
+            else{
+                mask_signal(SIGCHLD, SIG_BLOCK);
+                if (task->state == BACKGROUND){
+                    printf("[%d] (%s) Already in BACKGROUND", task->pgid,task->command);
+                }
+                else if (task->state==STOPPED) {
+                    task->state=BACKGROUND;
+                    killpg(task->pgid,SIGCONT);
+                    printf("[%d] (%s) Running in Background\n", task->pgid,task->command);
+                }
+                mask_signal(SIGCHLD, SIG_UNBLOCK);
+            }
+            continue;
+        }
         
-        
+        if (strcmp(argv[0],"fg")==0){
+            job *task;
+            mask_signal(SIGCHLD, SIG_BLOCK);
+            if (argv[1]==NULL) task=get_item_bypos(job_list,1);
+            
+            else task= get_item_bypos(job_list,atoi(argv[1]));
+
+            mask_signal(SIGCHLD, SIG_UNBLOCK); 
+            
+            if (task==NULL) perror("Not found");
+
+            else{
+                mask_signal(SIGCHLD, SIG_BLOCK);
+                task->state=FOREGROUND;
+                
+                tcsetpgrp(STDIN_FILENO,task->pgid);
+                killpg(task->pgid,SIGCONT);
+                
+                
+                pid_wait = waitpid(task->pgid, &wstatus, WUNTRACED);
+                tcsetpgrp(STDIN_FILENO,getpid());
+                
+                if (pid_wait == -1) perror("waitpid");
+                
+                if (WIFEXITED(wstatus)) {
+                    retval = WEXITSTATUS(wstatus);
+                    printf("[%d] (%s) Terminated with status: %d\n", task->pgid, task->command, retval);
+                    del_job(job_list,task);
+                    free_job(task);
+                    
+                }
+                    
+                else if (WIFSIGNALED(wstatus)) {
+                    int sig = WTERMSIG(wstatus);
+                    printf("[%d] (%s) Signaled by signal: %d\n", task->pgid, task->command, sig);
+                } 
+                    
+                else if (WIFSTOPPED(wstatus)){
+                    task->state=STOPPED;
+                    printf("[%d] (%s) Stopped by signal: %d\n", task->pgid, task->command, WSTOPSIG(wstatus));
+                } 
+                
+                else printf("[%d] (%s) other\n", task->pgid, task->command);
+                
+                mask_signal(SIGCHLD, SIG_UNBLOCK);
+                        
+            }
+            continue;
+        }
         // the steps are:
         // (1) fork a child process using fork()
      	pid_fork=fork();
@@ -230,6 +313,32 @@ int main(void)
                 
                 if (!background)tcsetpgrp(STDIN_FILENO,getpid());
                 terminal_signals(SIG_DFL);
+
+                //Redirections
+                if (file_in!=NULL){
+                    int f_in=open(file_in,O_RDONLY);
+
+                    if(f_in==-1){
+                        perror(file_in);
+                        exit(EXIT_FAILURE);
+                    }
+
+                    dup2(f_in,STDIN_FILENO);
+                    close(f_in);
+
+
+                }
+                if (file_out!=NULL){
+                    int f_out=open(file_out,O_CREAT|O_WRONLY|O_TRUNC,0664);
+
+                    if(f_out==-1){
+                        perror(file_out);
+                        exit(EXIT_FAILURE);
+                    }
+                    dup2(f_out,STDOUT_FILENO);
+                    close(f_out);
+                }
+
                 execvp(argv[0],argv);  
                 perror(argv[0]);
                 exit(EXIT_FAILURE);
