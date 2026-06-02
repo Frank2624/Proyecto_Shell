@@ -275,12 +275,14 @@ int main(void)
 {
     char **argv = NULL;
     int argc;
+    int argc2;
     job_list=new_list("Jobs");
     // probably useful variables:
     int background;             // equals 1 if a command is followed by '&'
     int pid_fork, pid_wait;     // pid for created and waited process
     int wstatus;                // status returned by waitpid
-    char *file_in, *file_out;   // for redirections
+    char *file_in, *file_out;  // for redirections
+    char *file_in2, *file_out2;
     int shell_pid=getpid();
     int last_pid=-1;
     sigset_t custom_mask;
@@ -293,6 +295,7 @@ int main(void)
        int apply_mask=0;
        int cond_and=0;
        int cond_or=0;
+       int is_pipe=0;
        char **argv_cmd2=NULL;
        free_argv(argv);
        int ret = get_command("ShellSO > ", &argc, &argv);
@@ -301,31 +304,45 @@ int main(void)
        if (argc == 0) continue;                // empty command: next iteration
        argc = parse_comments(argv);
        if (argc == 0) continue; // empty command after parsing comment #
-       // -----------------------------------------------------------------------------
-       //                       BÚSQUEDA DE CONDICIONALES 
-       // -----------------------------------------------------------------------------
+
+// -----------------------------------------------------------------------------
+//                 BÚSQUEDA DE CONDICIONALES
+// -----------------------------------------------------------------------------
        
-               for (int i = 0; argv[i] != NULL; i++) {
+       for (int i = 0; argv[i] != NULL; i++) {
                    if (strcmp(argv[i], "&&") == 0) {
                            cond_and = 1;
                            argv[i] = NULL;        
                            argv_cmd2 = &argv[i + 1];
                            break;
-                       }
+                    }
                    else if (strcmp(argv[i], "||") == 0) {
                            cond_or = 1;
                            argv[i] = NULL;           
                            argv_cmd2 = &argv[i + 1];
                            break;
-                       }
-               }
+                    }
+                    else if (strcmp(argv[i], "|") == 0) {
+                        is_pipe=1;
+                        argv[i] = NULL;           
+                        argv_cmd2 = &argv[i + 1];
+                        break;
+                    } 
+        }
        
-
-        argc = parse_background(argv, &background);
+        if (argv_cmd2!=NULL) argc=parse_background(argv_cmd2, &background);
+        else argc = parse_background(argv, &background);
+        
         if (argc == 0) continue; // empty command after parsing background &
+        
         argc=subs_autovars(argv,shell_pid,last_pid,retval);
+        if (argv_cmd2!=NULL) argc2=subs_autovars(argv,shell_pid,last_pid,retval);
+        
         argc = parse_redirections(argv,  &file_in, &file_out);
+        if (argv_cmd2!=NULL) argc2=parse_redirections(argv,  &file_in2, &file_out2);
+
         if (argc == 0) continue; // empty command after parsing redirections
+
         // -----------------------------------------------------------------------------
         //                         COMANDOS INTERNOS           
         // -----------------------------------------------------------------------------        
@@ -480,13 +497,144 @@ int main(void)
 // -----------------------------------------------------------------------------
 //                           COMANDOS EXTERNOS          
 // -----------------------------------------------------------------------------
-        execute_external_command(argv, background, file_in, file_out, apply_mask, custom_mask, &last_pid, &retval,&wstatus);
 
-        int exito = (WIFEXITED(wstatus) && WEXITSTATUS(wstatus) == 0);
 
-        if ((cond_and && exito) || (cond_or && !exito)) {
-            if (argv_cmd2 != NULL && argv_cmd2[0] != NULL) {
-            execute_external_command(argv_cmd2, background, file_in, file_out, apply_mask, custom_mask, &last_pid, &retval,&wstatus);
+        if (is_pipe){
+            int p[2];
+            pipe(p); //p[0] lectura y p[1] escritura
+
+            pid_fork=fork();
+            switch(pid_fork){
+                case -1: perror("fork");
+                
+                case 0: //child 1 
+                        setpgid(getpid(),getpid());
+                        
+                        if (!background)tcsetpgrp(STDIN_FILENO,getpid());
+                        terminal_signals(SIG_DFL);
+
+                        if (apply_mask) sigprocmask(SIG_BLOCK, &custom_mask, NULL);
+
+
+                        //Redireccion de entrada 
+                        if (file_in!=NULL){
+                            int f_in=open(file_in,O_RDONLY);
+
+                            if(f_in==-1){
+                                perror(file_in);
+                                exit(EXIT_FAILURE);
+                            }
+                            dup2(f_in,STDIN_FILENO);
+                            close(f_in);
+                        }
+
+                        dup2(p[1],STDOUT_FILENO);
+                        close(p[0]);
+                        close(p[1]);
+
+
+                        execvp(argv[0],argv);  
+                        perror(argv[0]);
+                        exit(EXIT_FAILURE);
+                
+                default:
+                        int pid_fork2=fork();
+                        switch(pid_fork2){
+                            case -1: perror("fork"); 
+                
+                            case 0: //child 2
+                                    setpgid(getpid(),pid_fork);
+                                    
+                                    if (!background)tcsetpgrp(STDIN_FILENO,getpid());
+                                    terminal_signals(SIG_DFL);
+
+                                    if (apply_mask) sigprocmask(SIG_BLOCK, &custom_mask, NULL);
+
+
+                                    //Redireccion de entrada 
+                                    if (file_out2!=NULL){
+                                        int f_out=open(file_out2,O_CREAT|O_WRONLY|O_TRUNC,0664);
+
+                                        if(f_out==-1){
+                                            perror(file_out2);
+                                            exit(EXIT_FAILURE);
+                                        }
+                                        dup2(f_out,STDOUT_FILENO);
+                                        close(f_out);
+                                    }
+
+                                    dup2(p[0],STDIN_FILENO);
+                                    close(p[0]);
+                                    close(p[1]);
+
+
+                                    execvp(argv_cmd2[0],argv_cmd2);  
+                                    perror(argv_cmd2[0]);
+                                    exit(EXIT_FAILURE);
+                            
+                            default://parent
+                                    setpgid(pid_fork,pid_fork);
+                                    setpgid(pid_fork2,pid_fork);
+                                    last_pid = pid_fork2;
+
+                                    close(p[0]);
+                                    close(p[1]);
+
+                                    char command_name[256];
+                                    snprintf(command_name, sizeof(command_name), "%s | %s", argv[0], argv_cmd2[0]);
+
+                                    if (!background) {
+                                        pid_wait = waitpid(pid_fork, &wstatus, WUNTRACED);
+                                        int pid_wait2=waitpid(pid_fork2,&wstatus,WUNTRACED);
+                                        tcsetpgrp(STDIN_FILENO,getpid());
+                                            
+                                    //    if (pid_wait == -1) perror("waitpid");
+                                      //  if(pid_wait2 == -1) perror("waitpid");
+                                
+                                        if (WIFEXITED(wstatus)) {
+                                            retval = WEXITSTATUS(wstatus);
+                                            printf("[%d] (%s) Terminated with status: %d\n", pid_fork, command_name, retval);
+                                        }
+                                            
+                                        else if (WIFSIGNALED(wstatus)) {
+                                            int sig = WTERMSIG(wstatus);
+                                            printf("[%d] (%s) Signaled by signal: %d\n", pid_fork, command_name, sig);
+                                        } 
+                                            
+                                        else if (WIFSTOPPED(wstatus)){
+                                            job *task= new_job(pid_fork,command_name,STOPPED);
+                                            mask_signal(SIGCHLD, SIG_BLOCK);
+                                            add_job(job_list,task);
+                                            mask_signal(SIGCHLD, SIG_UNBLOCK); 
+                                            printf("[%d] (%s) Stopped by signal: %d\n", pid_fork, command_name, WSTOPSIG(wstatus));
+                                        } 
+                                            
+                                        else printf("[%d] (%s) other\n", pid_fork, command_name);
+                                            
+                                // Gestiono las tareas lanzadas en BACKGROUND
+                                    } else{
+                                        job *task= new_job(pid_fork,command_name,BACKGROUND);
+                                        mask_signal(SIGCHLD, SIG_BLOCK);
+                                        add_job(job_list,task);
+                                        mask_signal(SIGCHLD, SIG_UNBLOCK); 
+                                        printf("[%d] (%s) Running in Background\n", pid_fork, command_name);
+                                    } 
+                                    
+                                
+                        }
+            }
+
+        }
+        else{
+
+            execute_external_command(argv, background, file_in, file_out, apply_mask, custom_mask, &last_pid, &retval,&wstatus);
+    
+            int exito = (WIFEXITED(wstatus) && WEXITSTATUS(wstatus) == 0);
+    
+            if ((cond_and && exito) || (cond_or && !exito)) {
+                if (argv_cmd2 != NULL && argv_cmd2[0] != NULL) {
+                execute_external_command(argv_cmd2, background, file_in2, file_out2, apply_mask, custom_mask, &last_pid, &retval,&wstatus);
+                }
             }
         }
     } // end while
