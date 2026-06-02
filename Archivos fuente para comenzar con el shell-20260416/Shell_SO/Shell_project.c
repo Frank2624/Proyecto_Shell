@@ -72,6 +72,95 @@ void mask_signal(int signal, int block)
     sigaddset(&mask, signal);
     sigprocmask(block, &mask, NULL); // block: SIG_BLOCK/SIG_UNBLOCK
 }
+// -----------------------------------------------------------------------------
+// EJECUCIÓN DE COMANDOS EXTERNOS
+// -----------------------------------------------------------------------------
+void execute_external_command(char **argv, int background, char *file_in, char *file_out, int apply_mask, sigset_t custom_mask, int *last_pid, int *retval,int *wstatus) {
+    int pid_fork, pid_wait;
+
+    // the steps are:
+    // (1) fork a child process using fork()
+    pid_fork=fork();
+    switch(pid_fork){
+    case -1: perror("fork"); return;
+    
+    case 0: //child
+    // (2) the child process will invoke execvp()
+            setpgid(getpid(),getpid());
+            
+            if (!background)tcsetpgrp(STDIN_FILENO,getpid());
+            terminal_signals(SIG_DFL);
+
+            if (apply_mask) sigprocmask(SIG_BLOCK, &custom_mask, NULL);
+
+
+            //Redirecciones de entrada y salida 
+            if (file_in!=NULL){
+                int f_in=open(file_in,O_RDONLY);
+
+                if(f_in==-1){
+                    perror(file_in);
+                    exit(EXIT_FAILURE);
+                }
+                dup2(f_in,STDIN_FILENO);
+                close(f_in);
+            }
+            if (file_out!=NULL){
+                int f_out=open(file_out,O_CREAT|O_WRONLY|O_TRUNC,0664);
+
+                if(f_out==-1){
+                    perror(file_out);
+                    exit(EXIT_FAILURE);
+                }
+                dup2(f_out,STDOUT_FILENO);
+                close(f_out);
+            }
+            execvp(argv[0],argv);  
+            perror(argv[0]);
+            exit(EXIT_FAILURE);
+    
+    default://parent
+            setpgid(pid_fork,pid_fork);
+            *last_pid = pid_fork;
+    // (3) if background == 0, the parent will wait, otherwise
+            if (!background) {
+                pid_wait = waitpid(pid_fork, wstatus, WUNTRACED);
+                tcsetpgrp(STDIN_FILENO,getpid());
+                
+                if (pid_wait == -1) perror("waitpid");
+    // (4) Shell shows a status message for processed command 
+                if (WIFEXITED(*wstatus)) {
+                    *retval = WEXITSTATUS(*wstatus);
+                    printf("[%d] (%s) Terminated with status: %d\n", pid_fork, argv[0], *retval);
+                }
+                
+                else if (WIFSIGNALED(*wstatus)) {
+                    int sig = WTERMSIG(*wstatus);
+                    printf("[%d] (%s) Signaled by signal: %d\n", pid_fork, argv[0], sig);
+                } 
+                
+                else if (WIFSTOPPED(*wstatus)){
+                    job *task= new_job(pid_fork,argv[0],STOPPED);
+                    mask_signal(SIGCHLD, SIG_BLOCK);
+                    add_job(job_list,task);
+                    mask_signal(SIGCHLD, SIG_UNBLOCK); 
+                    printf("[%d] (%s) Stopped by signal: %d\n", pid_fork, argv[0], WSTOPSIG(*wstatus));
+                } 
+                
+                else printf("[%d] (%s) other\n", pid_fork, argv[0]);
+                
+    // Gestiono las tareas lanzadas en BACKGROUND
+           } else{
+                job *task= new_job(pid_fork,argv[0],BACKGROUND);
+                mask_signal(SIGCHLD, SIG_BLOCK);
+                add_job(job_list,task);
+                mask_signal(SIGCHLD, SIG_UNBLOCK); 
+               printf("[%d] (%s) Running in Background\n", pid_fork, argv[0]);
+           } 
+        
+    // (5) loop ret
+    }
+}
 
 // -----------------------------------------------------------------------------
 // SUSTITUCIÓN DE VARIABLES AUTOMÁTICAS Y DE ENTORNO
@@ -194,22 +283,44 @@ int main(void)
     char *file_in, *file_out;   // for redirections
     int shell_pid=getpid();
     int last_pid=-1;
-    int retval=-1;
-    int apply_mask;
     sigset_t custom_mask;
     signal(SIGCHLD,handler_singchld);
+    int retval=-1;
 
     //Apago las señales para que la terminal no pueda ser detenida con ctrl z, ctrl c, etc
     terminal_signals(SIG_IGN);
     while (1) {
-        apply_mask=0;
-        free_argv(argv);
-        int ret = get_command("ShellSO > ", &argc, &argv);
-        if (ret == -1) exit(EXIT_FAILURE);      // error in read(2)
-        if (ret == 0) break;                    // finish loop if ^D (eof)
-        if (argc == 0) continue;                // empty command: next iteration
-        argc = parse_comments(argv);
-        if (argc == 0) continue; // empty command after parsing comment #
+       int apply_mask=0;
+       int cond_and=0;
+       int cond_or=0;
+       char **argv_cmd2=NULL;
+       free_argv(argv);
+       int ret = get_command("ShellSO > ", &argc, &argv);
+       if (ret == -1) exit(EXIT_FAILURE);      // error in read(2)
+       if (ret == 0) break;                    // finish loop if ^D (eof)
+       if (argc == 0) continue;                // empty command: next iteration
+       argc = parse_comments(argv);
+       if (argc == 0) continue; // empty command after parsing comment #
+       // -----------------------------------------------------------------------------
+       //                       BÚSQUEDA DE CONDICIONALES 
+       // -----------------------------------------------------------------------------
+       
+               for (int i = 0; argv[i] != NULL; i++) {
+                   if (strcmp(argv[i], "&&") == 0) {
+                           cond_and = 1;
+                           argv[i] = NULL;        
+                           argv_cmd2 = &argv[i + 1];
+                           break;
+                       }
+                   else if (strcmp(argv[i], "||") == 0) {
+                           cond_or = 1;
+                           argv[i] = NULL;           
+                           argv_cmd2 = &argv[i + 1];
+                           break;
+                       }
+               }
+       
+
         argc = parse_background(argv, &background);
         if (argc == 0) continue; // empty command after parsing background &
         argc=subs_autovars(argv,shell_pid,last_pid,retval);
@@ -304,7 +415,7 @@ int main(void)
                     printf("[%d] (%s) Terminated with status: %d\n", task->pgid, task->command, retval);
                     del_job(job_list,task);
                     free_job(task);
-                    
+
                 }
                     
                 else if (WIFSIGNALED(wstatus)) {
@@ -364,90 +475,19 @@ int main(void)
                 
         }
 
+
+
 // -----------------------------------------------------------------------------
 //                           COMANDOS EXTERNOS          
 // -----------------------------------------------------------------------------
-        // the steps are:
-        // (1) fork a child process using fork()
-     	pid_fork=fork();
-        switch(pid_fork){
-        case -1: perror("fork"); continue;
-        
-        case 0: //child
-        // (2) the child process will invoke execvp()
-                setpgid(getpid(),getpid());
-                
-                if (!background)tcsetpgrp(STDIN_FILENO,getpid());
-                terminal_signals(SIG_DFL);
+        execute_external_command(argv, background, file_in, file_out, apply_mask, custom_mask, &last_pid, &retval,&wstatus);
 
-                if (apply_mask) sigprocmask(SIG_BLOCK, &custom_mask, NULL);
+        int exito = (WIFEXITED(wstatus) && WEXITSTATUS(wstatus) == 0);
 
-
-                //Redirecciones de entrada y salida 
-                if (file_in!=NULL){
-                    int f_in=open(file_in,O_RDONLY);
-
-                    if(f_in==-1){
-                        perror(file_in);
-                        exit(EXIT_FAILURE);
-                    }
-                    dup2(f_in,STDIN_FILENO);
-                    close(f_in);
-                }
-                if (file_out!=NULL){
-                    int f_out=open(file_out,O_CREAT|O_WRONLY|O_TRUNC,0664);
-
-                    if(f_out==-1){
-                        perror(file_out);
-                        exit(EXIT_FAILURE);
-                    }
-                    dup2(f_out,STDOUT_FILENO);
-                    close(f_out);
-                }
-                execvp(argv[0],argv);  
-                perror(argv[0]);
-                exit(EXIT_FAILURE);
-        
-        default://parent
-                setpgid(pid_fork,pid_fork);
-                last_pid = pid_fork;
-        // (3) if background == 0, the parent will wait, otherwise
-                if (!background) {
-                    pid_wait = waitpid(pid_fork, &wstatus, WUNTRACED);
-                    tcsetpgrp(STDIN_FILENO,getpid());
-                    
-                    if (pid_wait == -1) perror("waitpid");
-        // (4) Shell shows a status message for processed command 
-                    if (WIFEXITED(wstatus)) {
-                        retval = WEXITSTATUS(wstatus);
-                        printf("[%d] (%s) Terminated with status: %d\n", pid_fork, argv[0], retval);
-                    }
-                    
-                    else if (WIFSIGNALED(wstatus)) {
-                        int sig = WTERMSIG(wstatus);
-                        printf("[%d] (%s) Signaled by signal: %d\n", pid_fork, argv[0], sig);
-                    } 
-                    
-                    else if (WIFSTOPPED(wstatus)){
-                        job *task= new_job(pid_fork,argv[0],STOPPED);
-                        mask_signal(SIGCHLD, SIG_BLOCK);
-                        add_job(job_list,task);
-                        mask_signal(SIGCHLD, SIG_UNBLOCK); 
-                        printf("[%d] (%s) Stopped by signal: %d\n", pid_fork, argv[0], WSTOPSIG(wstatus));
-                    } 
-                    
-                    else printf("[%d] (%s) other\n", pid_fork, argv[0]);
-                    
-        // Gestiono las tareas lanzadas en BACKGROUND
-               } else{
-                    job *task= new_job(pid_fork,argv[0],BACKGROUND);
-                    mask_signal(SIGCHLD, SIG_BLOCK);
-                    add_job(job_list,task);
-                    mask_signal(SIGCHLD, SIG_UNBLOCK); 
-                   printf("[%d] (%s) Running in Background\n", pid_fork, argv[0]);
-               } 
-            
-        // (5) loop ret
+        if ((cond_and && exito) || (cond_or && !exito)) {
+            if (argv_cmd2 != NULL && argv_cmd2[0] != NULL) {
+            execute_external_command(argv_cmd2, background, file_in, file_out, apply_mask, custom_mask, &last_pid, &retval,&wstatus);
+            }
         }
     } // end while
     printf("\nBye\n");
