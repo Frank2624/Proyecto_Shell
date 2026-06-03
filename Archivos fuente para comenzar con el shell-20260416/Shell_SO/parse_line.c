@@ -222,7 +222,7 @@ int parse_background(char **argv, int *background)
 // For a valid redirection, a blank space is required before and after
 // redirection operators '<' or '>'.
 // -----------------------------------------------------------------------------
-int parse_redirections(char **argv,  char **file_in, char **file_out)
+int parse_redirections(char **argv,  char **file_in, char **file_out, int *anex_out)
 {
     *file_in = NULL;
     *file_out = NULL;
@@ -231,7 +231,8 @@ int parse_redirections(char **argv,  char **file_in, char **file_out)
     while (*argv) {
         int is_in = !strcmp(*argv, "<");
         int is_out = !strcmp(*argv, ">");
-        if (is_in || is_out) {
+        int is_anex_out=!strcmp(*argv, ">>");
+        if (is_in || is_out || is_anex_out) {
             argv++;
             if (*argv) {
                 if (is_in) {
@@ -242,12 +243,13 @@ int parse_redirections(char **argv,  char **file_in, char **file_out)
                         *file_in = *argv;
                     }
                 }
-                if (is_out) {
+                if (is_out || is_anex_out) {
                     if (*file_out) {
                         fprintf(stderr, "too many output redirections: %s %s, keeping: %s\n",
                                         *file_out, *argv, *file_out);
                     } else {
                         *file_out = *argv;
+                        if (is_anex_out) *anex_out=1;
                     }
                 }
                 char **aux = argv + 1;

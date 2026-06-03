@@ -1,0 +1,13 @@
+- Ampliación 4: Enmascaramiento de señales: Creo un comando interno "mask" que permite ejecutar un comando enmascarando las señales que se indiquen (mask <s> -c <cmd [with arguments]>)
+
+-Ampliación 5: Ejecución condicional de un proceso tras la finalización de otro: Busco al principio del main los condicionales && y ||, en caso de encontrarlos, divido argv en dos comandos, ejecutaré el primero y en función de su resultado y del condicional ejecutaré o no el segundo comando (&& (and), sólo se ejecutará el segundo comando si el primero terminó con éxito, mientras que con el operando || (or) sólo se ejecutará el segundo operando si el primero no acaba con éxito )
+
+-Ampliación 7: Comunicación de dos procesos mediante un pipe simple: Al igual que en la 5, busco el simbolo | y si lo encuentro dividiré argv en dos, ejecutaré el primero y su salida será la entrada del segundo comando
+
+-Ejercicios examen práctico: 
+	1-modificación SIGHUP: Creo un manejador para que cada vez que se lance la señal sighup se añada al archivo hub.txt la cadena "SIGHUP recibido"
+	2-comando 'currjob': Creo un comando interno que devuelve al usuario el último trabajo creado de la lista de jobs (el primero de la lista)
+	3-comando 'bgteam': Creo un comando interno que lanza un comando el número de veces indicado en bg (bgteam <N> <comando>)
+	4-redirección >> (append): Cuando se detecte este comando se añadirá al final del fichero proporcionado o se creará este, no se sobrescribe
+	5-Comando interno basado en script: Creo el comando interno fico, dentro de las ejecuciones, que cuando se detecta ejecuta el fichero cuentafich.sh 
+		que contiene un script que cuenta el número de ficheros dado un prefijo o sin él 

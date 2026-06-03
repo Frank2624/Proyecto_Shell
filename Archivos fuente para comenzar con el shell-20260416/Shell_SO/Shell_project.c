@@ -75,7 +75,7 @@ void mask_signal(int signal, int block)
 // -----------------------------------------------------------------------------
 // EJECUCIÓN DE COMANDOS EXTERNOS
 // -----------------------------------------------------------------------------
-void execute_external_command(char **argv, int background, char *file_in, char *file_out, int apply_mask, sigset_t custom_mask, int *last_pid, int *retval,int *wstatus) {
+void execute_external_command(char **argv, int background, char *file_in, char *file_out, int apply_mask, sigset_t custom_mask, int *last_pid, int *retval,int *wstatus, int anex_out) {
     int pid_fork, pid_wait;
 
     // the steps are:
@@ -106,7 +106,11 @@ void execute_external_command(char **argv, int background, char *file_in, char *
                 close(f_in);
             }
             if (file_out!=NULL){
-                int f_out=open(file_out,O_CREAT|O_WRONLY|O_TRUNC,0664);
+                int f_out;
+                //Si se detecta el anexo >> se hará un append en lugar de trunc
+                if (anex_out==1) f_out=open(file_out,O_CREAT|O_WRONLY|O_APPEND,0664);
+
+                else f_out=open(file_out,O_CREAT|O_WRONLY|O_TRUNC,0664);
 
                 if(f_out==-1){
                     perror(file_out);
@@ -115,7 +119,14 @@ void execute_external_command(char **argv, int background, char *file_in, char *
                 dup2(f_out,STDOUT_FILENO);
                 close(f_out);
             }
-            execvp(argv[0],argv);  
+
+            char *ejecutable = argv[0];
+
+            //Comando interno para ejecutar el script cuentafich.sh
+            if (strcmp(argv[0], "fico") == 0)  ejecutable = "./cuentafich.sh";
+            
+            
+            execvp(ejecutable, argv);  
             perror(argv[0]);
             exit(EXIT_FAILURE);
     
@@ -166,7 +177,9 @@ void execute_external_command(char **argv, int background, char *file_in, char *
 // -----------------------------------------------------------------------------
 // EJECUCIÓN DE COMANDOS EXTERNOS CON PIPE
 // -----------------------------------------------------------------------------
-void execute_external_command_pipe(char **argv, char **argv_cmd2, int background, char *file_in, char *file_out2, int apply_mask, sigset_t custom_mask, int *last_pid, int *retval, int *wstatus) {
+//Aquí ejecuto los comandos del pipe, primero creo un hijo con el primer comando, cuya salida irá al pipe y luego creo un segundo hijo 
+// que pertenece al mismo grupo de procesos del primero y recibe como entrada el pipe
+void execute_external_command_pipe(char **argv, char **argv_cmd2, int background, char *file_in, char *file_out2, int apply_mask, sigset_t custom_mask, int *last_pid, int *retval, int *wstatus, int anex_out) {
     int pid_fork, pid_fork2, pid_wait;
     int p[2];
     pipe(p); //p[0] lectura y p[1] escritura
@@ -200,8 +213,13 @@ void execute_external_command_pipe(char **argv, char **argv_cmd2, int background
                 close(p[0]);
                 close(p[1]);
 
+                char *ejecutable = argv[0];
 
-                execvp(argv[0],argv);  
+                //Comando interno para ejecutar el script cuentafich.sh
+                if (strcmp(argv[0], "fico") == 0)  ejecutable = "./cuentafich.sh";
+            
+            
+                execvp(ejecutable, argv);    
                 perror(argv[0]);
                 exit(EXIT_FAILURE);
         
@@ -222,7 +240,11 @@ void execute_external_command_pipe(char **argv, char **argv_cmd2, int background
 
                             //Redireccion de entrada 
                             if (file_out2!=NULL){
-                                int f_out=open(file_out2,O_CREAT|O_WRONLY|O_TRUNC,0664);
+                                int f_out;
+                                //Si se detecta el anexo >> se hará un append en lugar de trunc
+                                if (anex_out==1) f_out=open(file_out2,O_CREAT|O_WRONLY|O_APPEND,0664);
+
+                                else f_out=open(file_out2,O_CREAT|O_WRONLY|O_TRUNC,0664);
 
                                 if(f_out==-1){
                                     perror(file_out2);
@@ -236,8 +258,12 @@ void execute_external_command_pipe(char **argv, char **argv_cmd2, int background
                             close(p[0]);
                             close(p[1]);
 
-
-                            execvp(argv_cmd2[0],argv_cmd2);  
+                            char *ejecutable = argv_cmd2[0];
+                            //Comando interno para ejecutar el script cuentafich.sh
+                            if (strcmp(argv_cmd2[0], "fico") == 0)  ejecutable = "./cuentafich.sh";
+            
+            
+                            execvp(ejecutable, argv_cmd2);
                             perror(argv_cmd2[0]);
                             exit(EXIT_FAILURE);
                     
@@ -350,9 +376,20 @@ int subs_autovars(char **argv, int shell_pid, int last_pid, int retval) {
     return cont;
 }
 // -----------------------------------------------------------------------------
+//      MANEJADOR DE LA SEÑAL SIGHUP       
+// -----------------------------------------------------------------------------
+//El manejador añade una cadena a hup.txt
+void handler_sighup(int signal){
+    FILE *fp;
+    fp=fopen("hup.txt","a"); // abre un fichero en modo 'append'
+    if (fp) { 
+        fprintf(fp, "SIGHUP recibido.\n"); //escribe en el fichero
+        fclose(fp);
+    }
+}
+// -----------------------------------------------------------------------------
 //      MANEJADOR DE LA SEÑAL SIGCHLD  (Procesos en Background/Suspendidos)      
 // -----------------------------------------------------------------------------
-
 void handler_singchld(int signal){
     while(1){
         int wstatus;
@@ -420,6 +457,7 @@ int main(void)
     int last_pid=-1;
     sigset_t custom_mask;
     signal(SIGCHLD,handler_singchld);
+    signal(SIGHUP,handler_sighup);
     int retval=-1;
 
     //Apago las señales para que la terminal no pueda ser detenida con ctrl z, ctrl c, etc
@@ -430,6 +468,7 @@ int main(void)
        int cond_or=0;
        int is_pipe=0;
        char **argv_cmd2=NULL;
+       int anex_out=0;
        free_argv(argv);
        int ret = get_command("ShellSO > ", &argc, &argv);
        if (ret == -1) exit(EXIT_FAILURE);      // error in read(2)
@@ -441,7 +480,7 @@ int main(void)
 // -----------------------------------------------------------------------------
 //                 BÚSQUEDA DE CONDICIONALES
 // -----------------------------------------------------------------------------
-       
+      //Compruebo tanto los condicionales como el pipe, para poder dividir argv en dos comandos separados  
        for (int i = 0; argv[i] != NULL; i++) {
                    if (strcmp(argv[i], "&&") == 0) {
                            cond_and = 1;
@@ -471,8 +510,8 @@ int main(void)
         argc=subs_autovars(argv,shell_pid,last_pid,retval);
         if (argv_cmd2!=NULL) argc2=subs_autovars(argv,shell_pid,last_pid,retval);
         
-        argc = parse_redirections(argv,  &file_in, &file_out);
-        if (argv_cmd2!=NULL) argc2=parse_redirections(argv,  &file_in2, &file_out2);
+        argc = parse_redirections(argv,  &file_in, &file_out, &anex_out);
+        if (argv_cmd2!=NULL) argc2=parse_redirections(argv, &file_in2, &file_out2,&anex_out);
 
         if (argc == 0) continue; // empty command after parsing redirections
 
@@ -502,7 +541,8 @@ int main(void)
         }
         // 'jobs' para visualizar la lista de trabajos 
         if (strcmp(argv[0],"jobs")==0){
-            mask_signal(SIGCHLD, SIG_BLOCK);            print_job_list(job_list);
+            mask_signal(SIGCHLD, SIG_BLOCK);       
+            print_job_list(job_list);
             mask_signal(SIGCHLD, SIG_UNBLOCK); 
 
             continue;
@@ -624,25 +664,59 @@ int main(void)
                 
         }
 
+        //'currjob' para devolver el último comando añadido
+        if (strcmp(argv[0],"currjob")==0){
+            job *task;
 
+            mask_signal(SIGCHLD, SIG_BLOCK);            
+            
+            task=get_item_bypos(job_list,1);
+            
+            mask_signal(SIGCHLD, SIG_UNBLOCK); 
+
+            if (task!=NULL) printf("Trabajo actual: PID=%i command=%s\n",task->pgid,task->command);
+
+            else printf("No hay trabajo actual\n");
+
+            continue;
+        }
+        //'bgteam' lanza un comando tantas veces como diga su argumento
+        if (strcmp(argv[0],"bgteam")==0){
+
+            if (argv[1]!=NULL && argv[2]!=NULL){
+                char *resto;
+
+                int n_jobs = strtol(argv[1], &resto, 10);
+                
+                // El número es negativo, cero, o tiene letras.
+                if (*resto=='\0' && n_jobs>0) {
+                    for (int i=0;i<n_jobs;i++){
+                        execute_external_command(&argv[2], 1, file_in, file_out, apply_mask, custom_mask, &last_pid, &retval,&wstatus,anex_out);
+                    }
+                }
+            }
+            else printf("El comando bgteam requiere dos argumentos\n");
+            continue;
+
+        }
 
 // -----------------------------------------------------------------------------
 //                           COMANDOS EXTERNOS          
 // -----------------------------------------------------------------------------
 
-
+//En caso de tener pipe, hago la ejecución de comando de manera distinta creando dos hijos 
         if (is_pipe){
-             execute_external_command_pipe(argv, argv_cmd2, background, file_in, file_out2, apply_mask, custom_mask, &last_pid, &retval, &wstatus);
+             execute_external_command_pipe(argv, argv_cmd2, background, file_in, file_out2, apply_mask, custom_mask, &last_pid, &retval, &wstatus,anex_out);
         }
         else{
 
-            execute_external_command(argv, background, file_in, file_out, apply_mask, custom_mask, &last_pid, &retval,&wstatus);
+            execute_external_command(argv, background, file_in, file_out, apply_mask, custom_mask, &last_pid, &retval,&wstatus,anex_out);
     
             int exito = (WIFEXITED(wstatus) && WEXITSTATUS(wstatus) == 0);
     
             if ((cond_and && exito) || (cond_or && !exito)) {
                 if (argv_cmd2 != NULL && argv_cmd2[0] != NULL) {
-                execute_external_command(argv_cmd2, background, file_in2, file_out2, apply_mask, custom_mask, &last_pid, &retval,&wstatus);
+                execute_external_command(argv_cmd2, background, file_in2, file_out2, apply_mask, custom_mask, &last_pid, &retval,&wstatus,anex_out);
                 }
             }
         }
