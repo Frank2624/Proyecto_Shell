@@ -189,15 +189,23 @@ int parse_comments(char **argv)
 //          if (argc == 0) continue;
 //          ...
 // -----------------------------------------------------------------------------
-int parse_background(char **argv, int *background)
+int parse_background(char **argv, int *background, int *respawn)
 {
     int argc = 0;
     *background = 0;
-    while (*argv && **argv != '&') {
+    while (*argv && **argv != '&' && **argv != '+' ) {
         argv++;
         argc++;
     }
-    if (*argv) *background = 1; // (**argv == '&')
+    if (*argv != NULL) {
+        if (strcmp(*argv, "&") == 0) {
+            *background = 1; 
+        } else if (strcmp(*argv, "+") == 0) {
+            *background = 1; 
+            *respawn = 1;
+        }
+    }
+
     while (*argv) {
         free(*argv);
         *argv = NULL;

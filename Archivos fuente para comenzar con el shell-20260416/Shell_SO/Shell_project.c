@@ -42,7 +42,15 @@
 #define CYAN "\x1b[36m"
 #define WHITE "\x1b[37m"
 #define DEFAULT "\x1b[39m"
+#include <pthread.h> // Librería obligatoria para hilos POSIX
 
+// Estructura para pasar datos al hilo de alarma
+typedef struct {
+    int segundos;
+    pid_t pid_hijo;
+} alarm_data_t;
+
+void *alarm_thread_func(void *arg);
 // -----------------------------------------------------------------------------
 //                            Global data structures
 // -----------------------------------------------------------------------------
@@ -50,6 +58,7 @@
 //  manejadores establecidos con signal() o sigaction()
 
     list_head_t *job_list = NULL; //lista de gestión de tareas
+    sigset_t custom_mask;
 
 // -----------------------------------------------------------------------------
 // Useful functions to deal with signal handlers and signal masks
@@ -72,10 +81,32 @@ void mask_signal(int signal, int block)
     sigaddset(&mask, signal);
     sigprocmask(block, &mask, NULL); // block: SIG_BLOCK/SIG_UNBLOCK
 }
+
+// Duplica un vector de argumentos completo (argv) en memoria dinámica
+char **dup_argv(char **argv) {
+    if (argv == NULL) return NULL;
+
+    
+    int count = 0;
+    while (argv[count] != NULL) {
+        count++;
+    }
+
+    
+    char **nuevo_argv = malloc((count + 1) * sizeof(char *));
+    if (nuevo_argv == NULL) return NULL;
+
+    for (int i = 0; i < count; i++) {
+        nuevo_argv[i] = strdup(argv[i]);
+    }
+    nuevo_argv[count] = NULL; 
+
+    return nuevo_argv;
+}
 // -----------------------------------------------------------------------------
 // EJECUCIÓN DE COMANDOS EXTERNOS
 // -----------------------------------------------------------------------------
-void execute_external_command(char **argv, int background, char *file_in, char *file_out, int apply_mask, sigset_t custom_mask, int *last_pid, int *retval,int *wstatus, int anex_out) {
+void execute_external_command(char **argv, int background, char *file_in, char *file_out, int apply_mask, int *last_pid, int *retval,int *wstatus, int anex_out,int respawn,int alarm_secs) {
     int pid_fork, pid_wait;
 
     // the steps are:
@@ -134,6 +165,24 @@ void execute_external_command(char **argv, int background, char *file_in, char *
             setpgid(pid_fork,pid_fork);
             *last_pid = pid_fork;
             mask_signal(SIGCHLD, SIG_BLOCK);
+            
+            if (alarm_secs > 0) {
+                alarm_data_t *data = malloc(sizeof(alarm_data_t));
+                data->segundos = alarm_secs;
+                data->pid_hijo = pid_fork;
+
+                pthread_t thread_id;
+                pthread_attr_t attr;
+                pthread_attr_init(&attr);
+                pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+
+                if (pthread_create(&thread_id, &attr, alarm_thread_func, (void *)data) != 0) {
+                    perror("pthread_create");
+                    free(data);
+                }
+                pthread_attr_destroy(&attr);
+            }
+
     // (3) if background == 0, the parent will wait, otherwise
             if (!background) {
                 pid_wait = waitpid(pid_fork, wstatus, WUNTRACED);
@@ -165,7 +214,15 @@ void execute_external_command(char **argv, int background, char *file_in, char *
                 
     // Gestiono las tareas lanzadas en BACKGROUND
            } else{
-                job *task= new_job(pid_fork,argv[0],BACKGROUND);
+                job *task;
+//Compruebo si el trabajo es respawneable, duplico su comando completo con los parametros de entrada y creo el job con su estado
+                if (respawn == 1) {
+                    task = new_job(pid_fork, argv[0], RESPAWN);
+                    task->argv = dup_argv(argv);
+                }
+
+                else task= new_job(pid_fork,argv[0],BACKGROUND);
+
                 add_job(job_list,task);
                printf("[%d] (%s) Running in Background\n", pid_fork, argv[0]);
            } 
@@ -179,7 +236,7 @@ void execute_external_command(char **argv, int background, char *file_in, char *
 // -----------------------------------------------------------------------------
 //Aquí ejecuto los comandos del pipe, primero creo un hijo con el primer comando, cuya salida irá al pipe y luego creo un segundo hijo 
 // que pertenece al mismo grupo de procesos del primero y recibe como entrada el pipe
-void execute_external_command_pipe(char **argv, char **argv_cmd2, int background, char *file_in, char *file_out2, int apply_mask, sigset_t custom_mask, int *last_pid, int *retval, int *wstatus, int anex_out) {
+void execute_external_command_pipe(char **argv, char **argv_cmd2, int background, char *file_in, char *file_out2, int apply_mask, int *last_pid, int *retval, int *wstatus, int anex_out, int respawn) {
     int pid_fork, pid_fork2, pid_wait;
     int p[2];
     pipe(p); //p[0] lectura y p[1] escritura
@@ -311,8 +368,15 @@ void execute_external_command_pipe(char **argv, char **argv_cmd2, int background
                                 
                                 // Gestiono las tareas lanzadas en BACKGROUND
                             } else{
-                                job *task= new_job(pid_fork,command_name,BACKGROUND);
-                                add_job(job_list,task);
+                                job *task;
+
+                                if (respawn == 1) {
+                                    task = new_job(pid_fork, argv[0], RESPAWN);
+                                    task->argv = dup_argv(argv);
+                                }
+                                                
+                                else task= new_job(pid_fork,command_name,BACKGROUND);
+
                                 printf("[%d] (%s) Running in Background\n", pid_fork, command_name);
                             } 
                             mask_signal(SIGCHLD, SIG_UNBLOCK); 
@@ -375,6 +439,19 @@ int subs_autovars(char **argv, int shell_pid, int last_pid, int retval) {
     }
     return cont;
 }
+
+void *alarm_thread_func(void *arg){
+    alarm_data_t *data = (alarm_data_t *)arg;
+    int time_left = data->segundos;
+
+    while (time_left > 0) time_left = sleep(time_left);
+    
+    kill(data->pid_hijo, SIGKILL);
+    free(data);
+
+    pthread_exit(NULL);
+}
+
 // -----------------------------------------------------------------------------
 //      MANEJADOR DE LA SEÑAL SIGHUP       
 // -----------------------------------------------------------------------------
@@ -403,37 +480,55 @@ void handler_singchld(int signal){
 
         if (task == NULL) continue;
 
-        if (WIFEXITED(wstatus)) {
-            
-            printf("[%d] (%s) Terminated with status: %d\n", task->pgid,task->command,WEXITSTATUS(wstatus));
-            mask_signal(SIGCHLD, SIG_BLOCK);
-            del_job(job_list,task);
-            free_job(task);
-            mask_signal(SIGCHLD, SIG_UNBLOCK); 
+        if (WIFEXITED(wstatus) || WIFSIGNALED(wstatus) ) {
+            if WIFEXITED(wstatus){
+                printf("\n[%d] (%s) Terminated with status: %d\n", task->pgid, task->command, WEXITSTATUS(wstatus));
+            }
+            else {
+                int sig = WTERMSIG(wstatus);
+                printf("\n[%d] (%s) Signaled by signal: %d\n", task->pgid, task->command, sig);
+            }
+//Si su estado es respawn resucito el proceso en lugar de liberarlo de jobs
+            if (task->state == RESPAWN) {
+                int new_pid = fork();
+                if (new_pid == 0) {
+                    setpgid(getpid(), getpid());
+                    terminal_signals(SIG_DFL);
 
+                    execvp(task->argv[0], task->argv);
+                    perror(task->argv[0]);
+
+                    exit(EXIT_FAILURE);
+                } else if (new_pid > 0) {
+                    mask_signal(SIGCHLD, SIG_BLOCK);
+                    task->pgid = new_pid;
+                    mask_signal(SIGCHLD, SIG_UNBLOCK);
+                }
+            } else {
+                mask_signal(SIGCHLD, SIG_BLOCK);
+                del_job(job_list, task);
+                free_job(task);
+                mask_signal(SIGCHLD, SIG_UNBLOCK); 
+            }
         }
-                    
-         else if (WIFSIGNALED(wstatus)) {
-            int sig = WTERMSIG(wstatus);
-            printf("[%d] (%s) Signaled by signal: %d\n", task->pgid,task->command, sig);
+
+         else if (WIFSTOPPED(wstatus)){
+            printf("\n[%d] (%s) Stopped by signal: %d\n", task->pgid, task->command, WSTOPSIG(wstatus));
+            // Si lo suspendemos, se queda suspendido, no resucita.
             mask_signal(SIGCHLD, SIG_BLOCK);
-            del_job(job_list,task);
-            free_job(task);
-            mask_signal(SIGCHLD, SIG_UNBLOCK); 
-        } 
-                    
-        else if (WIFSTOPPED(wstatus)){
-            mask_signal(SIGCHLD, SIG_BLOCK);
-            task->state=STOPPED;
+            task->state = STOPPED;
             mask_signal(SIGCHLD, SIG_UNBLOCK);
-            printf("[%d] (%s) Stopped by signal: %d\n", task->pgid,task->command, WSTOPSIG(wstatus));
-        } 
-                    
-        else if(WIFCONTINUED(wstatus)) {
+            
+        } else if(WIFCONTINUED(wstatus)) {
             mask_signal(SIGCHLD, SIG_BLOCK);
-            task->state=BACKGROUND;
+            // Si es un respawnable que reanudamos, vuelve a ser RESPAWN, no BACKGROUND normal
+            if (task->state == STOPPED && strcmp(task->command, "+") == 0) { // O lógica similar si guardaste el flag
+                task->state = BACKGROUND; // Para simplificar, lo reanudamos normal
+            } else {
+                task->state = BACKGROUND;
+            }
             mask_signal(SIGCHLD, SIG_UNBLOCK);
-            printf("[%d] (%s) continued\n", task->pgid,task->command);
+            printf("\n[%d] (%s) continued\n", task->pgid, task->command);
         }
     }
 }
@@ -455,7 +550,6 @@ int main(void)
     char *file_in2, *file_out2;
     int shell_pid=getpid();
     int last_pid=-1;
-    sigset_t custom_mask;
     signal(SIGCHLD,handler_singchld);
     signal(SIGHUP,handler_sighup);
     int retval=-1;
@@ -469,6 +563,7 @@ int main(void)
        int is_pipe=0;
        char **argv_cmd2=NULL;
        int anex_out=0;
+       int respawn=0;
        free_argv(argv);
        int ret = get_command("ShellSO > ", &argc, &argv);
        if (ret == -1) exit(EXIT_FAILURE);      // error in read(2)
@@ -502,8 +597,8 @@ int main(void)
                     } 
         }
        
-        if (argv_cmd2!=NULL) argc=parse_background(argv_cmd2, &background);
-        else argc = parse_background(argv, &background);
+        if (argv_cmd2!=NULL) argc=parse_background(argv_cmd2, &background,&respawn);
+        else argc = parse_background(argv, &background,&respawn);
         
         if (argc == 0) continue; // empty command after parsing background &
         
@@ -514,6 +609,7 @@ int main(void)
         if (argv_cmd2!=NULL) argc2=parse_redirections(argv, &file_in2, &file_out2,&anex_out);
 
         if (argc == 0) continue; // empty command after parsing redirections
+
 
         // -----------------------------------------------------------------------------
         //                         COMANDOS INTERNOS           
@@ -691,13 +787,42 @@ int main(void)
                 // El número es negativo, cero, o tiene letras.
                 if (*resto=='\0' && n_jobs>0) {
                     for (int i=0;i<n_jobs;i++){
-                        execute_external_command(&argv[2], 1, file_in, file_out, apply_mask, custom_mask, &last_pid, &retval,&wstatus,anex_out);
+                        execute_external_command(&argv[2], 1, file_in, file_out, apply_mask, &last_pid, &retval,&wstatus,anex_out,respawn,0);
                     }
                 }
             }
             else printf("El comando bgteam requiere dos argumentos\n");
             continue;
+            
+        }
+        
+        if (strcmp(argv[0], "alarm-thread") == 0) {
+            
+            if (argv[1] != NULL && argv[2] != NULL) {
+                
+                char *resto;
+                int segundos = strtol(argv[1], &resto, 10);
 
+                if (*resto == '\0' && segundos > 0) {
+                    int pid_lanzado = -1;
+                    execute_external_command(&argv[2], background, file_in, file_out, apply_mask, &pid_lanzado, &retval, &wstatus, anex_out, respawn,segundos);
+                    
+
+                    int exito = (WIFEXITED(wstatus) && WEXITSTATUS(wstatus) == 0);
+                    if ((cond_and && exito) || (cond_or && !exito)) {
+                        if (argv_cmd2 != NULL && argv_cmd2[0] != NULL) {
+                            // Al comando encadenado NO le ponemos alarma (0 al final)
+                            execute_external_command(argv_cmd2, background, file_in2, file_out2, apply_mask, &last_pid, &retval, &wstatus, anex_out, respawn, 0);
+                        }
+                    }
+                
+                } else printf("Error: El primer argumento debe ser un número entero de segundos mayor que cero.\n");
+
+            } else printf("Error de sintaxis. Uso: alarm-thread <N> <comando> [args]\n");
+            
+
+
+            continue;
         }
 
 // -----------------------------------------------------------------------------
@@ -706,17 +831,17 @@ int main(void)
 
 //En caso de tener pipe, hago la ejecución de comando de manera distinta creando dos hijos 
         if (is_pipe){
-             execute_external_command_pipe(argv, argv_cmd2, background, file_in, file_out2, apply_mask, custom_mask, &last_pid, &retval, &wstatus,anex_out);
+             execute_external_command_pipe(argv, argv_cmd2, background, file_in, file_out2, apply_mask, &last_pid, &retval, &wstatus,anex_out, respawn);
         }
         else{
 
-            execute_external_command(argv, background, file_in, file_out, apply_mask, custom_mask, &last_pid, &retval,&wstatus,anex_out);
+            execute_external_command(argv, background, file_in, file_out, apply_mask, &last_pid, &retval,&wstatus,anex_out,respawn,0);
     
             int exito = (WIFEXITED(wstatus) && WEXITSTATUS(wstatus) == 0);
     
             if ((cond_and && exito) || (cond_or && !exito)) {
                 if (argv_cmd2 != NULL && argv_cmd2[0] != NULL) {
-                execute_external_command(argv_cmd2, background, file_in2, file_out2, apply_mask, custom_mask, &last_pid, &retval,&wstatus,anex_out);
+                execute_external_command(argv_cmd2, background, file_in2, file_out2, apply_mask, &last_pid, &retval,&wstatus,anex_out,respawn,0);
                 }
             }
         }

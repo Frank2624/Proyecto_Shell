@@ -13,7 +13,7 @@
 int get_command(char *, int *, char ***);
 void free_argv(char **);
 int parse_comments(char **);
-int parse_background(char **, int *);
+int parse_background(char **, int *,int *);
 int parse_redirections(char **,  char **, char **, int *);
 
 #endif
